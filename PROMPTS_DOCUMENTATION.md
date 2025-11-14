@@ -796,3 +796,312 @@ Your suggested answer here
 }
 ```
 
+
+---
+
+## Промты Режимов Работы
+
+### 6.1 Modes Section - Секция Режимов
+
+**Назначение:** Предоставляет информацию о доступных режимах работы агента и возможность их создания.
+
+**Расположение:** `src/core/prompts/sections/modes.ts`
+
+**Встроенные режимы:**
+- **Code** - основной режим для написания и редактирования кода
+- **Architect** - режим для проектирования архитектуры (редактирует только .md файлы)
+- **Ask** - режим для ответов на вопросы без изменения кода
+- **Debug** - режим для отладки и исправления ошибок
+
+**Кастомные режимы:**
+- Пользователь может создавать собственные режимы
+- Каждый режим имеет свою роль (roleDefinition)
+- Каждый режим может иметь ограничения на редактирование файлов
+
+**Создание режима:**
+- Использовать инструмент `fetch_instructions` с task="create_mode"
+- Определить название, slug, роль и ограничения
+
+**Код промта:**
+
+```typescript
+export async function getModesSection(context: vscode.ExtensionContext): Promise<string> {
+	const allModes = await getAllModesWithPrompts(context)
+
+	let modesContent = `====
+
+MODES
+
+- These are the currently available modes:
+${allModes.map((mode: ModeConfig) => `  * "${mode.name}" mode (${mode.slug}) - ${mode.roleDefinition.split(".")[0]}`).join("\n")}`
+
+	modesContent += `
+If the user asks you to create or edit a new mode for this project, you should read the instructions by using the fetch_instructions tool, like this:
+<fetch_instructions>
+<task>create_mode</task>
+</fetch_instructions>
+`
+
+	return modesContent
+}
+```
+
+---
+
+## Промты MCP Серверов
+
+### 7.1 MCP Servers Section - Секция MCP Серверов
+
+**Назначение:** Описывает подключенные Model Context Protocol серверы и их возможности.
+
+**Расположение:** `src/core/prompts/sections/mcp-servers.ts`
+
+**Типы MCP серверов:**
+
+1. **Local (Stdio-based) серверы:**
+   - Запускаются локально на машине пользователя
+   - Коммуникация через стандартный ввод/вывод
+
+2. **Remote (SSE-based) серверы:**
+   - Запускаются на удаленных машинах
+   - Коммуникация через Server-Sent Events (SSE) по HTTP/HTTPS
+
+**Информация о подключенных серверах:**
+- Название сервера и команда запуска
+- Доступные инструменты (tools) с input schema
+- Шаблоны ресурсов (resource templates)
+- Прямые ресурсы (direct resources)
+
+**Использование MCP:**
+- `use_mcp_tool` - использование инструментов сервера
+- `access_mcp_resource` - доступ к ресурсам сервера
+
+**Создание MCP сервера:**
+- Использовать `fetch_instructions` с task="create_mcp_server"
+
+**Код промта:**
+
+```typescript
+export async function getMcpServersSection(
+	mcpHub?: McpHub,
+	diffStrategy?: DiffStrategy,
+	enableMcpServerCreation?: boolean,
+): Promise<string> {
+	if (!mcpHub) {
+		return ""
+	}
+
+	const connectedServers =
+		mcpHub.getServers().length > 0
+			? `${mcpHub
+					.getServers()
+					.filter((server) => server.status === "connected")
+					.map((server) => {
+						const tools = server.tools
+							?.map((tool) => {
+								const schemaStr = tool.inputSchema
+									? `    Input Schema:
+		${JSON.stringify(tool.inputSchema, null, 2).split("\n").join("\n    ")}`
+									: ""
+
+								return `- ${tool.name}: ${tool.description}\n${schemaStr}`
+							})
+							.join("\n\n")
+
+						const templates = server.resourceTemplates
+							?.map((template) => `- ${template.uriTemplate} (${template.name}): ${template.description}`)
+							.join("\n")
+
+						const resources = server.resources
+							?.map((resource) => `- ${resource.uri} (${resource.name}): ${resource.description}`)
+							.join("\n")
+
+						const config = JSON.parse(server.config)
+
+						return (
+							`## ${server.name} (\`${config.command}${config.args && Array.isArray(config.args) ? ` ${config.args.join(" ")}` : ""}\`)` +
+							(tools ? `\n\n### Available Tools\n${tools}` : "") +
+							(templates ? `\n\n### Resource Templates\n${templates}` : "") +
+							(resources ? `\n\n### Direct Resources\n${resources}` : "")
+						)
+					})
+					.join("\n\n")}`
+			: "(No MCP servers currently connected)"
+
+	const baseSection = `MCP SERVERS
+
+The Model Context Protocol (MCP) enables communication between the system and MCP servers that provide additional tools and resources to extend your capabilities. MCP servers can be one of two types:
+
+1. Local (Stdio-based) servers: These run locally on the user's machine and communicate via standard input/output
+2. Remote (SSE-based) servers: These run on remote machines and communicate via Server-Sent Events (SSE) over HTTP/HTTPS
+
+# Connected MCP Servers
+
+When a server is connected, you can use the server's tools via the \`use_mcp_tool\` tool, and access the server's resources via the \`access_mcp_resource\` tool.
+
+${connectedServers}`
+
+	if (!enableMcpServerCreation) {
+		return baseSection
+	}
+
+	return (
+		baseSection +
+		`
+## Creating an MCP Server
+
+The user may ask you something along the lines of "add a tool" that does some function, in other words to create an MCP server that provides tools and resources that may connect to external APIs for example. If they do, you should obtain detailed instructions on this topic using the fetch_instructions tool, like this:
+<fetch_instructions>
+<task>create_mcp_server</task>
+</fetch_instructions>`
+	)
+}
+```
+
+---
+
+## Промты Пользовательских Инструкций
+
+### 9.1 Custom Instructions - Пользовательские Инструкции
+
+**Назначение:** Загружает и форматирует пользовательские инструкции и правила из различных источников.
+
+**Расположение:** `src/core/prompts/sections/custom-instructions.ts`
+
+**Источники инструкций:**
+
+1. **Language Preference** - предпочтительный язык общения
+2. **Global Instructions** - глобальные инструкции для всех режимов
+3. **Mode-specific Instructions** - инструкции для конкретного режима
+4. **Rules** - правила из файлов
+
+**Структура директорий для правил:**
+
+```
+.pearai-agent/
+  rules/                  # Общие правила
+  rules-code/             # Правила для Code режима
+  rules-architect/        # Правила для Architect режима
+  rules-{mode}/          # Правила для других режимов
+```
+
+**Поддерживаемые файлы правил (legacy):**
+- `.roorules` - общие правила Roo
+- `.clinerules` - общие правила Cline
+- `.roorules-{mode}` - правила для режима (Roo)
+- `.clinerules-{mode}` - правила для режима (Cline)
+
+**Особенности:**
+- Поддержка символических ссылок (до 5 уровней глубины)
+- Рекурсивное чтение директорий
+- Автоматическое форматирование с заголовками файлов
+- Приоритет: mode-specific rules → generic rules
+- Алфавитная сортировка файлов
+
+**Структура выходного промта:**
+
+```
+====
+
+USER'S CUSTOM INSTRUCTIONS
+
+Language Preference:
+You should always speak and think in the "{language}" language...
+
+Global Instructions:
+{globalCustomInstructions}
+
+Mode-specific Instructions:
+{modeCustomInstructions}
+
+Rules:
+
+# Rules from {file}:
+{content}
+```
+
+**Код промта:**
+
+```typescript
+export async function addCustomInstructions(
+	modeCustomInstructions: string,
+	globalCustomInstructions: string,
+	cwd: string,
+	mode: string,
+	options: { language?: string; rooIgnoreInstructions?: string } = {},
+): Promise<string> {
+	const sections = []
+
+	// Add language preference if provided
+	if (options.language) {
+		const languageName = isLanguage(options.language) ? LANGUAGES[options.language] : options.language
+		sections.push(
+			`Language Preference:\nYou should always speak and think in the "${languageName}" (${options.language}) language unless the user gives you instructions below to do otherwise.`,
+		)
+	}
+
+	// Add global instructions first
+	if (typeof globalCustomInstructions === "string" && globalCustomInstructions.trim()) {
+		sections.push(`Global Instructions:\n${globalCustomInstructions.trim()}`)
+	}
+
+	// Add mode-specific instructions after
+	if (typeof modeCustomInstructions === "string" && modeCustomInstructions.trim()) {
+		sections.push(`Mode-specific Instructions:\n${modeCustomInstructions.trim()}`)
+	}
+
+	// Load and add rules from files
+	const rules = []
+	
+	// Mode-specific rules
+	const modeRulesDir = path.join(cwd, AGENT_RULES_DIR, `rules-${mode}`)
+	if (await directoryExists(modeRulesDir)) {
+		const files = await readTextFilesFromDirectory(modeRulesDir)
+		if (files.length > 0) {
+			rules.push(formatDirectoryContent(modeRulesDir, files))
+		}
+	}
+
+	// Generic rules
+	const genericRuleContent = await loadRuleFiles(cwd)
+	if (genericRuleContent && genericRuleContent.trim()) {
+		rules.push(genericRuleContent.trim())
+	}
+
+	if (rules.length > 0) {
+		sections.push(`Rules:\n\n${rules.join("\n\n")}`)
+	}
+
+	const joinedSections = sections.join("\n\n")
+
+	return joinedSections
+		? `
+====
+
+USER'S CUSTOM INSTRUCTIONS
+
+The following additional instructions are provided by the user, and should be followed to the best of your ability without interfering with the TOOL USE guidelines.
+
+${joinedSections}`
+		: ""
+}
+```
+
+---
+
+## Заключение
+
+Эта документация охватывает все основные промты, используемые в PearAI (Roo-Code компонент). Система промтов построена модульно, где каждая секция отвечает за определенную функциональность:
+
+1. **Системные промты** - собирают все компоненты вместе
+2. **Цели и задачи** - определяют методологию работы
+3. **Возможности** - описывают доступные функции
+4. **Правила** - устанавливают ограничения и стандарты
+5. **Работа с инструментами** - объясняют процесс использования инструментов
+6. **Режимы** - предоставляют различные режимы работы
+7. **MCP серверы** - расширяют функциональность через протокол MCP
+8. **Инструменты** - конкретные промты для каждого инструмента
+9. **Пользовательские инструкции** - позволяют кастомизацию поведения
+
+Все промты работают вместе для создания эффективного AI агента, способного выполнять сложные задачи разработки.
+
