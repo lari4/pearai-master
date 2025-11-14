@@ -526,3 +526,273 @@ By waiting for and carefully considering the user's response after each tool use
 }
 ```
 
+
+---
+
+## Промты Инструментов
+
+Каждый инструмент имеет свой промт-описание, которое объясняет AI агенту как правильно использовать инструмент.
+
+### 8.1 read_file - Чтение Файлов
+
+**Назначение:** Чтение содержимого файлов с возможностью указания диапазона строк.
+
+**Расположение:** `src/core/prompts/tools/read-file.ts`
+
+**Параметры:**
+- `path` (обязательный) - путь к файлу относительно рабочей директории
+- `start_line` (опциональный) - начальная строка (1-based)
+- `end_line` (опциональный) - конечная строка (1-based, включительно)
+
+**Особенности:**
+- Возвращает содержимое с номерами строк (например, "1 | const x = 1")
+- Поддерживает чтение частей больших файлов
+- Автоматически извлекает текст из PDF и DOCX файлов
+- Эффективное стриминговое чтение для больших файлов
+
+**Код промта:**
+
+```typescript
+export function getReadFileDescription(args: ToolArgs): string {
+	return `## read_file
+Description: Request to read the contents of a file at the specified path. Use this when you need to examine the contents of an existing file you do not know the contents of, for example to analyze code, review text files, or extract information from configuration files. The output includes line numbers prefixed to each line (e.g. "1 | const x = 1"), making it easier to reference specific lines when creating diffs or discussing code. By specifying start_line and end_line parameters, you can efficiently read specific portions of large files without loading the entire file into memory. Automatically extracts raw text from PDF and DOCX files. May not be suitable for other types of binary files, as it returns the raw content as a string.
+Parameters:
+- path: (required) The path of the file to read (relative to the current workspace directory ${args.cwd})
+- start_line: (optional) The starting line number to read from (1-based). If not provided, it starts from the beginning of the file.
+- end_line: (optional) The ending line number to read to (1-based, inclusive). If not provided, it reads to the end of the file.
+Usage:
+<read_file>
+<path>File path here</path>
+<start_line>Starting line number (optional)</start_line>
+<end_line>Ending line number (optional)</end_line>
+</read_file>`
+}
+```
+
+### 8.2 write_to_file - Запись Файлов
+
+**Назначение:** Создание новых файлов или полная перезапись существующих.
+
+**Расположение:** `src/core/prompts/tools/write-to-file.ts`
+
+**Параметры:**
+- `path` (обязательный) - путь к файлу
+- `content` (обязательный) - ПОЛНОЕ содержимое файла
+- `line_count` (обязательный) - количество строк в файле
+
+**КРИТИЧЕСКИ ВАЖНО:**
+- ВСЕГДА предоставлять ПОЛНОЕ содержимое файла
+- ЗАПРЕЩЕНО использовать плейсхолдеры типа "// rest of code unchanged"
+- Автоматически создает необходимые директории
+- НЕ включать номера строк в content
+
+**Код промта:**
+
+```typescript
+export function getWriteToFileDescription(args: ToolArgs): string {
+	return `## write_to_file
+Description: Request to write full content to a file at the specified path. If the file exists, it will be overwritten with the provided content. If the file doesn't exist, it will be created. This tool will automatically create any directories needed to write the file.
+Parameters:
+- path: (required) The path of the file to write to (relative to the current workspace directory ${args.cwd})
+- content: (required) The content to write to the file. ALWAYS provide the COMPLETE intended content of the file, without any truncation or omissions. You MUST include ALL parts of the file, even if they haven't been modified. Do NOT include the line numbers in the content though, just the actual content of the file.
+- line_count: (required) The number of lines in the file. Make sure to compute this based on the actual content of the file, not the number of lines in the content you're providing.
+Usage:
+<write_to_file>
+<path>File path here</path>
+<content>
+Your file content here
+</content>
+<line_count>total number of lines in the file, including empty lines</line_count>
+</write_to_file>`
+}
+```
+
+### 8.3 execute_command - Выполнение Команд
+
+**Назначение:** Выполнение CLI команд в системе пользователя.
+
+**Расположение:** `src/core/prompts/tools/execute-command.ts`
+
+**Параметры:**
+- `command` (обязательный) - CLI команда для выполнения
+- `cwd` (опциональный) - рабочая директория для выполнения
+
+**Рекомендации:**
+- Использовать относительные пути и команды
+- Предпочитать сложные CLI команды вместо скриптов
+- Объяснять, что делает команда
+- Адаптировать команды под ОС пользователя
+- Использовать правильный синтаксис цепочки команд для shell
+
+**Код промта:**
+
+```typescript
+export function getExecuteCommandDescription(args: ToolArgs): string | undefined {
+	return `## execute_command
+Description: Request to execute a CLI command on the system. Use this when you need to perform system operations or run specific commands to accomplish any step in the user's task. You must tailor your command to the user's system and provide a clear explanation of what the command does. For command chaining, use the appropriate chaining syntax for the user's shell. Prefer to execute complex CLI commands over creating executable scripts, as they are more flexible and easier to run. Prefer relative commands and paths that avoid location sensitivity for terminal consistency, e.g: \`touch ./testdata/example.file\`, \`dir ./examples/model1/data/yaml\`, or \`go test ./cmd/front --config ./cmd/front/config.yml\`. If directed by the user, you may open a terminal in a different directory by using the \`cwd\` parameter.
+Parameters:
+- command: (required) The CLI command to execute. This should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions.
+- cwd: (optional) The working directory to execute the command in (default: ${args.cwd})
+Usage:
+<execute_command>
+<command>Your command here</command>
+<cwd>Working directory path (optional)</cwd>
+</execute_command>`
+}
+```
+
+### 8.4 attempt_completion - Завершение Задачи
+
+**Назначение:** Представление результата выполненной задачи пользователю.
+
+**Расположение:** `src/core/prompts/tools/attempt-completion.ts`
+
+**Параметры:**
+- `result` (обязательный) - финальный результат задачи
+- `command` (опциональный) - CLI команда для демонстрации результата
+
+**ВАЖНО:**
+- НЕЛЬЗЯ использовать до подтверждения успеха предыдущих инструментов
+- НЕ заканчивать вопросами или предложениями дальнейшей помощи
+- Формулировать результат финально, без необходимости дальнейшего ввода
+- Command должна показывать живое демо (например, `open index.html`)
+- НЕ использовать команды типа `echo` или `cat`
+
+**Код промта:**
+
+```typescript
+export function getAttemptCompletionDescription(): string {
+	return `## attempt_completion
+Description: After each tool use, the user will respond with the result of that tool use, i.e. if it succeeded or failed, along with any reasons for failure. Once you've received the results of tool uses and can confirm that the task is complete, use this tool to present the result of your work to the user. Optionally you may provide a CLI command to showcase the result of your work. The user may respond with feedback if they are not satisfied with the result, which you can use to make improvements and try again.
+IMPORTANT NOTE: This tool CANNOT be used until you've confirmed from the user that any previous tool uses were successful. Failure to do so will result in code corruption and system failure. Before using this tool, you must ask yourself in <thinking></thinking> tags if you've confirmed from the user that any previous tool uses were successful. If not, then DO NOT use this tool.
+Parameters:
+- result: (required) The result of the task. Formulate this result in a way that is final and does not require further input from the user. Don't end your result with questions or offers for further assistance.
+- command: (optional) A CLI command to execute to show a live demo of the result to the user. For example, use \`open index.html\` to display a created html website, or \`open localhost:3000\` to display a locally running development server. But DO NOT use commands like \`echo\` or \`cat\` that merely print text. This command should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions.
+Usage:
+<attempt_completion>
+<result>
+Your final result description here
+</result>
+<command>Command to demonstrate result (optional)</command>
+</attempt_completion>`
+}
+```
+
+### 8.5 search_files - Поиск по Файлам
+
+**Назначение:** Regex поиск по файлам в указанной директории с контекстом.
+
+**Расположение:** `src/core/prompts/tools/search-files.ts`
+
+**Параметры:**
+- `path` (обязательный) - директория для поиска (рекурсивно)
+- `regex` (обязательный) - regex паттерн (Rust regex синтаксис)
+- `file_pattern` (опциональный) - glob паттерн для фильтрации файлов (например, '*.ts')
+
+**Использование:**
+- Поиск паттернов кода
+- Поиск TODO комментариев
+- Поиск определений функций
+- Поиск любой текстовой информации
+- Результаты включают окружающий контекст
+
+**Код промта:**
+
+```typescript
+export function getSearchFilesDescription(args: ToolArgs): string {
+	return `## search_files
+Description: Request to perform a regex search across files in a specified directory, providing context-rich results. This tool searches for patterns or specific content across multiple files, displaying each match with encapsulating context.
+Parameters:
+- path: (required) The path of the directory to search in (relative to the current workspace directory ${args.cwd}). This directory will be recursively searched.
+- regex: (required) The regular expression pattern to search for. Uses Rust regex syntax.
+- file_pattern: (optional) Glob pattern to filter files (e.g., '*.ts' for TypeScript files). If not provided, it will search all files (*).
+Usage:
+<search_files>
+<path>Directory path here</path>
+<regex>Your regex pattern here</regex>
+<file_pattern>file pattern here (optional)</file_pattern>
+</search_files>`
+}
+```
+
+### 8.6 list_files - Просмотр Файлов
+
+**Назначение:** Просмотр списка файлов и директорий.
+
+**Расположение:** `src/core/prompts/tools/list-files.ts`
+
+**Параметры:**
+- `path` (обязательный) - путь к директории
+- `recursive` (опциональный) - рекурсивный просмотр (true/false)
+
+**Использование:**
+- Исследование структуры проекта
+- Проверка существования директорий
+- Просмотр содержимого папок
+- НЕ использовать для подтверждения создания файлов
+
+**Код промта:**
+
+```typescript
+export function getListFilesDescription(args: ToolArgs): string {
+	return `## list_files
+Description: Request to list files and directories within the specified directory. If recursive is true, it will list all files and directories recursively. If recursive is false or not provided, it will only list the top-level contents. Do not use this tool to confirm the existence of files you may have created, as the user will let you know if the files were created successfully or not.
+Parameters:
+- path: (required) The path of the directory to list contents for (relative to the current workspace directory ${args.cwd})
+- recursive: (optional) Whether to list files recursively. Use true for recursive listing, false or omit for top-level only.
+Usage:
+<list_files>
+<path>Directory path here</path>
+<recursive>true or false (optional)</recursive>
+</list_files>`
+}
+```
+
+### 8.7 ask_followup_question - Задать Вопрос
+
+**Назначение:** Задать пользователю вопрос для получения дополнительной информации.
+
+**Расположение:** `src/core/prompts/tools/ask-followup-question.ts`
+
+**Параметры:**
+- `question` (обязательный) - ясный, конкретный вопрос
+- `follow_up` (обязательный) - список из 2-4 предлагаемых ответов
+
+**Требования к предлагаемым ответам:**
+- Каждый в своем теге `<suggest>`
+- Конкретный и действенный
+- Напрямую связан с задачей
+- Полный ответ без плейсхолдеров
+- БЕЗ скобок или пустых мест для заполнения
+- Упорядочены по приоритету
+
+**Когда использовать:**
+- При неоднозначностях
+- Когда нужны уточнения
+- Для сбора деталей
+- Использовать умеренно, избегая чрезмерного диалога
+
+**Код промта:**
+
+```typescript
+export function getAskFollowupQuestionDescription(): string {
+	return `## ask_followup_question
+Description: Ask the user a question to gather additional information needed to complete the task. This tool should be used when you encounter ambiguities, need clarification, or require more details to proceed effectively. It allows for interactive problem-solving by enabling direct communication with the user. Use this tool judiciously to maintain a balance between gathering necessary information and avoiding excessive back-and-forth.
+Parameters:
+- question: (required) The question to ask the user. This should be a clear, specific question that addresses the information you need.
+- follow_up: (required) A list of 2-4 suggested answers that logically follow from the question, ordered by priority or logical sequence. Each suggestion must:
+  1. Be provided in its own <suggest> tag
+  2. Be specific, actionable, and directly related to the completed task
+  3. Be a complete answer to the question - the user should not need to provide additional information or fill in any missing details. DO NOT include placeholders with brackets or parentheses.
+Usage:
+<ask_followup_question>
+<question>Your question here</question>
+<follow_up>
+<suggest>
+Your suggested answer here
+</suggest>
+</follow_up>
+</ask_followup_question>`
+}
+```
+
