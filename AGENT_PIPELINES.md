@@ -563,3 +563,486 @@ try {
     └─> Возврат в LLM для обработки ошибки
 ```
 
+
+---
+
+## 4. Пайплайн Работы с Файлами
+
+**Описание:** Комплексный процесс отслеживания, чтения, редактирования и применения изменений к файлам.
+
+**ASCII Схема:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              ФАЙЛОВЫЕ ОПЕРАЦИИ                                   │
+└─────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│  1. FILE CONTEXT TRACKING                                        │
+│     FileContextTracker                                           │
+│                                                                  │
+│     Отслеживает:                                                 │
+│     - Какие файлы были прочитаны                                 │
+│     - Какие файлы были изменены                                  │
+│     - Размер контекста в токенах                                 │
+│                                                                  │
+│     addFile(path, content) → tracking map                        │
+│     hasExceededLimit() → boolean                                 │
+└──────────────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  2. ЧТЕНИЕ ФАЙЛОВ                                                │
+│                                                                  │
+│     read_file tool                                               │
+│     ┌────────────────────────────────────────────────────────┐  │
+│     │ Input: path, start_line?, end_line?                    │  │
+│     │                                                        │  │
+│     │ Процесс:                                               │  │
+│     │ 1. Resolve absolute path                              │  │
+│     │ 2. Check file exists                                  │  │
+│     │ 3. Detect file type (PDF/DOCX/text)                   │  │
+│     │ 4. Read content:                                      │  │
+│     │    - Full file OR                                     │  │
+│     │    - Line range (streaming)                           │  │
+│     │ 5. Add line numbers                                   │  │
+│     │ 6. Track in FileContextTracker                        │  │
+│     │                                                        │  │
+│     │ Output: Content with line numbers                     │  │
+│     │ "1 | import React from 'react'"                       │  │
+│     │ "2 | "                                                │  │
+│     │ "3 | function App() {"                                │  │
+│     └────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  3. РЕДАКТИРОВАНИЕ ФАЙЛОВ                                        │
+│                                                                  │
+│  Три стратегии редактирования:                                  │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ A. write_to_file - Полная перезапись                      │ │
+│  │                                                            │ │
+│  │    Input: path, complete_content, line_count              │ │
+│  │                                                            │ │
+│  │    Когда использовать:                                     │ │
+│  │    - Создание нового файла                                 │ │
+│  │    - Большие изменения (>50% файла)                        │ │
+│  │    - Полная переработка                                    │ │
+│  │                                                            │ │
+│  │    Процесс:                                                │ │
+│  │    1. Validate: content не пустой                          │ │
+│  │    2. Validate: нет плейсхолдеров                          │ │
+│  │    3. Show diff preview                                    │ │
+│  │    4. Request approval                                     │ │
+│  │    5. Backup old content                                   │ │
+│  │    6. Write new content                                    │ │
+│  │    7. Update FileContextTracker                            │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ B. apply_diff - Применение diff изменений                 │ │
+│  │                                                            │ │
+│  │    Input: path, diff (unified diff format)                │ │
+│  │                                                            │ │
+│  │    Когда использовать:                                     │ │
+│  │    - Точечные изменения                                    │ │
+│  │    - Изменения нескольких строк                            │ │
+│  │    - Более безопасно для больших файлов                    │ │
+│  │                                                            │ │
+│  │    Процесс:                                                │ │
+│  │    1. Parse diff                                           │ │
+│  │    2. Validate: строки соответствуют файлу                 │ │
+│  │    3. Apply diff chunks                                    │ │
+│  │    4. Fuzzy matching (если exact match не найден)          │ │
+│  │    5. Show preview                                         │ │
+│  │    6. Request approval                                     │ │
+│  │    7. Apply changes                                        │ │
+│  │    8. Update FileContextTracker                            │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ C. insert_content - Вставка строк                         │ │
+│  │                                                            │ │
+│  │    Input: path, line_number, content                       │ │
+│  │                                                            │ │
+│  │    Когда использовать:                                     │ │
+│  │    - Добавление новых функций                              │ │
+│  │    - Вставка импортов                                      │ │
+│  │    - Добавление в конец файла (line=0)                     │ │
+│  │                                                            │ │
+│  │    Процесс:                                                │ │
+│  │    1. Read current file                                    │ │
+│  │    2. Insert content at line_number                        │ │
+│  │    3. Show preview                                         │ │
+│  │    4. Request approval                                     │ │
+│  │    5. Write modified file                                  │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ D. search_and_replace - Поиск и замена                    │ │
+│  │                                                            │ │
+│  │    Input: path, operations[]                               │ │
+│  │    operations: { search, replace, isRegex }                │ │
+│  │                                                            │ │
+│  │    Когда использовать:                                     │ │
+│  │    - Переименование переменных                             │ │
+│  │    - Замена паттернов кода                                 │ │
+│  │    - Множественные замены                                  │ │
+│  │                                                            │ │
+│  │    Процесс:                                                │ │
+│  │    1. Read file                                            │ │
+│  │    2. For each operation:                                  │ │
+│  │       - Find matches (string or regex)                     │ │
+│  │       - Apply replacement                                  │ │
+│  │    3. Show all changes                                     │ │
+│  │    4. Request approval                                     │ │
+│  │    5. Write modified file                                  │ │
+│  └────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  4. DIFF VIEW PROVIDER                                           │
+│     Интерактивный предварительный просмотр изменений             │
+│                                                                  │
+│     showDiff(path, oldContent, newContent)                       │
+│     ┌────────────────────────────────────────────────────────┐  │
+│     │                                                        │  │
+│     │  ┌──────────────┐     ┌──────────────┐                │  │
+│     │  │   BEFORE     │     │    AFTER     │                │  │
+│     │  ├──────────────┤     ├──────────────┤                │  │
+│     │  │ 1: const x=1 │ --> │ 1: const x=2 │  Changed       │  │
+│     │  │ 2: const y=2 │     │ 2: const y=2 │                │  │
+│     │  │              │     │ 3: const z=3 │  Added         │  │
+│     │  └──────────────┘     └──────────────┘                │  │
+│     │                                                        │  │
+│     │  Highlights:                                           │  │
+│     │  - Green: добавленные строки                           │  │
+│     │  - Red: удаленные строки                               │  │
+│     │  - Yellow: измененные строки                           │  │
+│     └────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│     revertChanges() - откат изменений                            │
+│     applyChanges() - применение изменений                        │
+└──────────────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  5. ROO IGNORE CONTROLLER                                        │
+│     Фильтрация файлов на основе .rooignore                       │
+│                                                                  │
+│     shouldIgnore(path): boolean                                  │
+│                                                                  │
+│     Patterns:                                                    │
+│     - node_modules/                                              │
+│     - .git/                                                      │
+│     - dist/                                                      │
+│     - *.log                                                      │
+│     - Кастомные паттерны из .rooignore                           │
+│                                                                  │
+│     Используется:                                                │
+│     - При list_files                                             │
+│     - При search_files                                           │
+│     - При получении environment_details                          │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Поток обработки файловых изменений:**
+
+```
+User Request: "Update the CSS in styles.css"
+        │
+        ▼
+LLM Response:
+┌────────────────────────────────────────────────────────┐
+│ <thinking>                                             │
+│ I need to read the current styles.css to see what      │
+│ needs to be updated.                                   │
+│ </thinking>                                            │
+│                                                        │
+│ <read_file>                                            │
+│ <path>styles.css</path>                                │
+│ </read_file>                                           │
+└────────────────────────────────────────────────────────┘
+        │
+        ▼
+Tool Execution: read_file
+        │
+        ▼
+Tool Result:
+┌────────────────────────────────────────────────────────┐
+│ 1 | body {                                             │
+│ 2 |   margin: 0;                                       │
+│ 3 |   padding: 0;                                      │
+│ 4 | }                                                  │
+└────────────────────────────────────────────────────────┘
+        │
+        ▼
+LLM Response:
+┌────────────────────────────────────────────────────────┐
+│ <thinking>                                             │
+│ I'll add a dark theme to the CSS.                     │
+│ </thinking>                                            │
+│                                                        │
+│ <write_to_file>                                        │
+│ <path>styles.css</path>                                │
+│ <content>                                              │
+│ body {                                                 │
+│   margin: 0;                                           │
+│   padding: 0;                                          │
+│   background-color: #1a1a1a;                           │
+│   color: #ffffff;                                      │
+│ }                                                      │
+│ </content>                                             │
+│ <line_count>6</line_count>                             │
+│ </write_to_file>                                       │
+└────────────────────────────────────────────────────────┘
+        │
+        ▼
+Diff Preview:
+┌────────────────────────────────────────────────────────┐
+│  1 | body {                                            │
+│  2 |   margin: 0;                                      │
+│  3 |   padding: 0;                                     │
+│ +4 |   background-color: #1a1a1a;                      │
+│ +5 |   color: #ffffff;                                 │
+│  6 | }                                                 │
+└────────────────────────────────────────────────────────┘
+        │
+        ▼
+User Approval (or auto-approve if enabled)
+        │
+        ▼
+File Written Successfully
+        │
+        ▼
+Tool Result: "Successfully wrote to styles.css"
+```
+
+---
+
+## 5. Пайплайн Режимов Работы
+
+**Описание:** Управление различными режимами работы агента и их ограничениями.
+
+**ASCII Схема:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   РЕЖИМЫ РАБОТЫ                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│  ВСТРОЕННЫЕ РЕЖИМЫ                                               │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ CODE (по умолчанию)                                        │ │
+│  │                                                            │ │
+│  │ Role: "You are Roo, a highly skilled software engineer    │ │
+│  │        with extensive knowledge..."                        │ │
+│  │                                                            │ │
+│  │ File Restrictions: Нет (может редактировать все файлы)     │ │
+│  │                                                            │ │
+│  │ Available Tools:                                           │ │
+│  │ - read_file                                                │ │
+│  │ - write_to_file                                            │ │
+│  │ - apply_diff                                               │ │
+│  │ - insert_content                                           │ │
+│  │ - search_and_replace                                       │ │
+│  │ - execute_command                                          │ │
+│  │ - list_files                                               │ │
+│  │ - search_files                                             │ │
+│  │ - list_code_definition_names                               │ │
+│  │ - browser_action (если enabled)                            │ │
+│  │ - use_mcp_tool (если MCP enabled)                          │ │
+│  │ - access_mcp_resource                                      │ │
+│  │ - ask_followup_question                                    │ │
+│  │ - attempt_completion                                       │ │
+│  │ - switch_mode                                              │ │
+│  │ - fetch_instructions                                       │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ ARCHITECT                                                  │ │
+│  │                                                            │ │
+│  │ Role: "You are Roo in Architect Mode, specialized in      │ │
+│  │        software architecture and design..."                │ │
+│  │                                                            │ │
+│  │ File Restrictions: Только .md файлы                        │ │
+│  │ Regex: "\\.md$"                                            │ │
+│  │                                                            │ │
+│  │ Available Tools:                                           │ │
+│  │ - read_file (все файлы)                                    │ │
+│  │ - write_to_file (только .md)                               │ │
+│  │ - insert_content (только .md)                              │ │
+│  │ - search_and_replace (только .md)                          │ │
+│  │ - list_files                                               │ │
+│  │ - search_files                                             │ │
+│  │ - list_code_definition_names                               │ │
+│  │ - ask_followup_question                                    │ │
+│  │ - attempt_completion                                       │ │
+│  │ - switch_mode                                              │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ ASK                                                        │ │
+│  │                                                            │ │
+│  │ Role: "You are Roo in Ask Mode, focused on answering      │ │
+│  │        questions and providing explanations..."            │ │
+│  │                                                            │ │
+│  │ File Restrictions: Не может редактировать файлы            │ │
+│  │                                                            │ │
+│  │ Available Tools:                                           │ │
+│  │ - read_file                                                │ │
+│  │ - list_files                                               │ │
+│  │ - search_files                                             │ │
+│  │ - list_code_definition_names                               │ │
+│  │ - browser_action (для поиска информации)                   │ │
+│  │ - ask_followup_question                                    │ │
+│  │ - attempt_completion                                       │ │
+│  │ - switch_mode                                              │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ DEBUG                                                      │ │
+│  │                                                            │ │
+│  │ Role: "You are Roo in Debug Mode, expert at finding       │ │
+│  │        and fixing bugs..."                                 │ │
+│  │                                                            │ │
+│  │ File Restrictions: Нет (может редактировать все файлы)     │ │
+│  │                                                            │ │
+│  │ Available Tools: Все tools как в Code mode                │ │
+│  │                                                            │ │
+│  │ Special Features:                                          │ │
+│  │ - Акцент на чтение логов и error stacks                    │ │
+│  │ - Частое использование execute_command для тестов          │ │
+│  │ - Детальный анализ состояния системы                       │ │
+│  └────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│  ПЕРЕКЛЮЧЕНИЕ РЕЖИМОВ                                            │
+│                                                                  │
+│  Trigger: switch_mode tool                                       │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ <switch_mode>                                              │ │
+│  │ <mode>architect</mode>                                     │ │
+│  │ </switch_mode>                                             │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                    │                                             │
+│                    ▼                                             │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ switchModeTool.execute()                                   │ │
+│  │                                                            │ │
+│  │ 1. Validate: mode exists                                  │ │
+│  │ 2. Pause current task                                     │ │
+│  │ 3. Save current state                                     │ │
+│  │ 4. Load new mode config                                   │ │
+│  │ 5. Regenerate system prompt                               │ │
+│  │ 6. Resume task in new mode                                │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                    │                                             │
+│                    ▼                                             │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ Новый System Prompt:                                       │ │
+│  │ - Новый roleDefinition                                     │ │
+│  │ - Новые ограничения на инструменты                         │ │
+│  │ - Новые customInstructions (если есть)                     │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                    │                                             │
+│                    ▼                                             │
+│  Продолжение задачи с новым контекстом                          │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│  ВАЛИДАЦИЯ ИНСТРУМЕНТОВ                                          │
+│                                                                  │
+│  validateToolUse(toolName, toolInput, mode)                      │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ Проверки:                                                  │ │
+│  │                                                            │ │
+│  │ 1. Инструмент разрешен для режима?                        │ │
+│  │    isToolAllowedForMode(toolName, mode)                   │ │
+│  │                                                            │ │
+│  │ 2. Если редактирование файла:                              │ │
+│  │    - Получить fileRestriction для режима                  │ │
+│  │    - Проверить путь файла против regex                    │ │
+│  │                                                            │ │
+│  │    Пример (Architect mode):                               │ │
+│  │    fileRestriction: "\\.md$"                              │ │
+│  │    path: "README.md" ✓ OK                                 │ │
+│  │    path: "app.js"    ✗ FileRestrictionError               │ │
+│  │                                                            │ │
+│  │ 3. Если ошибка:                                            │ │
+│  │    throw FileRestrictionError(                            │ │
+│  │      `Architect mode can only edit files matching         │ │
+│  │       pattern "\\.md$". File "app.js" does not match.`    │ │
+│  │    )                                                       │ │
+│  └────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│  КАСТОМНЫЕ РЕЖИМЫ                                                │
+│                                                                  │
+│  Создание: через .roo/modes/ директорию                          │
+│                                                                  │
+│  Файл: .roo/modes/my-custom-mode.json                            │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ {                                                          │ │
+│  │   "slug": "my-custom-mode",                                │ │
+│  │   "name": "My Custom Mode",                                │ │
+│  │   "roleDefinition": "You are Roo in Custom Mode...",      │ │
+│  │   "groups": ["code"],                                      │ │
+│  │   "fileRestriction": "\\.tsx?$",                           │ │
+│  │   "customInstructions": "Additional instructions..."       │ │
+│  │ }                                                          │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  Загрузка:                                                       │
+│  1. При старте расширения                                        │
+│  2. Из vscode.workspace.getConfiguration("roo").customModes      │
+│  3. Объединение с встроенными режимами                           │
+│  4. Доступны через switch_mode                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Пример потока переключения режимов:**
+
+```
+Task: "Design the architecture for a new microservices system"
+Initial Mode: code
+        │
+        ▼
+LLM: "This requires architectural planning. Let me switch to architect mode."
+        │
+        ▼
+<switch_mode>
+<mode>architect</mode>
+</switch_mode>
+        │
+        ▼
+System: 
+- Pause task
+- Save state: { mode: "code", step: "analyzing requirements" }
+- Load architect mode config
+- Regenerate system prompt with architect roleDefinition
+- Resume task
+        │
+        ▼
+New System Prompt:
+"You are Roo in Architect Mode, specialized in software architecture...
+...
+File restrictions: You can only edit files matching pattern "\\.md$""
+        │
+        ▼
+LLM creates: ARCHITECTURE.md, DESIGN.md
+(All in markdown format, follows restrictions)
+        │
+        ▼
+Task complete in architect mode
+```
+
